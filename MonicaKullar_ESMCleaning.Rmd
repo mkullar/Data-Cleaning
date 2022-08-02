@@ -1,0 +1,365 @@
+---
+title: "High-volume Data Wrangling, Analysis, and Visuals"
+author: "Monica Kullar"
+output: html_document
+---
+### This is a large datasheet of **220,150 rows and 21 columns** originally downloaded as a text file with lots of messiness to unpack, document, and organize!
+ Here I provide code for (1) reading-in and cleaning data systematically to process, (2) subsetting and organizing data by blocks based on differing timescales, (3) confirming data integrity, (4) troubleshooting possible data issues, (5) creating wide versions of the data and probing missingness to consider impact on analysis, and (6) providing a analysis and data visualization sample (exploring data, visual trends by groups, and analyzing group differences on a calculated metric from the data).
+
+```{r message=FALSE}
+# all packages used across all script chunks
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(VIM)
+library(mice)
+library(zoo)
+library(ggplot2)
+library(ggpubr)
+library(wesanderson)
+library(svglite)
+library(data.table)
+library(rstatix)
+```
+##     (1) Reading in the data
+  I read in, correct variable IDs to be intuitive, debug various recordkeeping issues, and recode certain output formats to begin processing data.
+```{r read-in data}
+### Read in datasheet containing null response timepoints .txt file
+esmnull <- read.delim(file = "~/ownCloud/PhD/Projects/Data/ESM/ESM2019_data_2020-06-01_16_52_01_with_null_values_comma_header_95_15_16_17.txt", sep = ",", na.strings=c(""), header = T, stringsAsFactors = FALSE, colClasses = "character")
+sapply(esmnull, class) # check the class of variables to confirm what is appropriate and what needs transformations - should transform time from a character to a number
+
+### Eliminate testing day of time 0 from improper start input of two participants
+esmnull <- esmnull %>%
+  filter(testingday != '0')  # eliminate testing days read in as day0 from improper start input of two participants
+### Create time variable instead of multiple time ID columns for improved data visuals to come in handy later.
+esmnull <- esmnull %>% unite('time', testingday:timepoint, sep = ".", remove = FALSE)
+### Shorten datasheet to variables of interest by column name
+testvar <- c("moniker", "qblock", "q", "ans", "timepoint", "testingday", "time")
+esmnull <- esmnull[testvar]
+### Remove test ID used in piloting (999) and excluded dropouts. Because there are so many multiple rows per ID variable, dplyr's filter sometimes incorrectly only removes the first instances, thus base R provides a quicker resolution of all exclusions.
+esmnull <- esmnull[!(esmnull$moniker=="999"),]
+esmnull <- esmnull[!(esmnull$moniker=="2"),]
+esmnull <- esmnull[!(esmnull$moniker=="19"),]
+esmnull <- esmnull[!(esmnull$moniker=="35"),]
+esmnull <- esmnull[!(esmnull$moniker=="85"),]
+esmnull <- esmnull[!(esmnull$moniker=="103"),]
+
+### Eliminate blank 'q' for instruction screens (this is not actual missing data, and I want to accurately assess missingness later)
+blankq <- !is.na(esmnull$q) #confirm first if these blanks register as FALSE
+sum(blankq, na.rm = TRUE) #total number of TRUEs, for quality control to confirm we removed correct NAs
+length(blankq[blankq==FALSE]) #another way to count, for FALSEs
+#eliminate NAs from 'q' column specifically for blank screens that were displayed between questions
+esmnull <- esmnull %>% filter(!is.na(q))
+### There are multiple observations where Likert scales have been read in as "1-text" and "7-text" for anchor points, rename these answers, and any yes/no to become binary
+esmnull$ans[startsWith(esmnull$ans, "1")] <-  "1"
+esmnull$ans[startsWith(esmnull$ans, "7")] <-  "7"
+esmnull$ans[startsWith(esmnull$ans, "no")] <-  "0"
+esmnull$ans[startsWith(esmnull$ans, "yes")] <-  "1"
+
+### There is a key such that within each of the 2 question blocks, qblock and q columns represent certain variables of interest. Let's rename these to be more intuitive in further processing, visualization, and analysis. Long version by qblock/q and intuitive new name.
+intuitvarnames1 <- data.frame ('qblock'=c(rep(1,18), rep(2,25)), 'q'=c(1:18, 1:25), 'newq'=c('CurrentTask', 'MWoccur', 'MWvalence', 'MWsubject', 'MWtemporal',  'MWimmers', 'MWcontrol', 'MWspecif', 'Enthusiastic', 'Happy_e', 'Pleased', 'Relaxed', 'Nervous', 'Sad', 'Angry', 'Irritated', 'Stressed', 'EmotionChronometry', 'SleepTime',  'WakeTime',  'SleepHours', 'SleepQuality', 'Happy_m', 'Lively', 'Content', 'Satisfied', 'Depressed', 'Bored', 'Anxious', 'Irritable', 'Tense', 'MoodStuck', 'MoodRegAttempt', 'CogAvoid', 'BehavAvoid',  'CogRelax', 'BehavRelax', 'CogDistract', 'BehavDistract', 'CogReapp', 'SupportSeek', 'ProbSolve', 'Accept'))
+intuitvarnames2 <- data.frame ('qblock'=c(rep(2,19)), 'q'=c('5t', '6t', '7t', '8t', '9t', '10t', '11t', '12t', '13t', '16e', '17e', '18e', '19e', '20e', '21e', '22e', '23e' ,'24e', '25e'), 'newq'=c('Happy_mChronometry', 'LivelyChronometry', 'ContentChronometry', 'SatisfiedChronometry', 'DepressedChronometry', 'BoredChronometry', 'AnxiousChronometry', 'IrritableChronometry', 'TenseChronometry', 'CogAvoidEffic', 'BehavAvoidEffic', 'CogRelaxEffic', 'BehavRelaxEffic', 'CogDistractEffic', 'BehavDistractEffic', 'CogReappEffic', 'SupportSeekEffic', 'ProbSolveEffic', 'AcceptEffic'))  #this is even more name variables that aren't denoted by a purely numerical q value, like the other dataframe above
+
+intuitvarnames <- rbind(intuitvarnames1, intuitvarnames2) #bind the rows for a master "intuitive variable name key" of mind wandering, emotions, moods, mood chronnometry and mood regulation efficacy.
+esmnull <- merge(esmnull, intuitvarnames, by = c("qblock", "q"), all.x = TRUE)
+esmnull <- dplyr::rename(esmnull, oldq = q, q = newq) #let's rename our old q so we don't continue to use that, and let's rename our new q intuitive variable names so we may shorten our dataset one last time to the most relevant variables as we move on.
+
+esmnull <- esmnull[testvar] #get rid of blank variable columns used to rename variables to be intuitive
+```
+##      (2) Subsetting Data
+  Here I split the data into subsets for analysis aims to better process the large dataset, since each of the two question blocks technically operate on different timescales and should be treated as two datasets later on (block 1 has 70 timepoints, but block 2 has 14 timepoints taken separately).
+```{r subset null data, warning=FALSE}
+#### Confirm the class for variables as we begin to further set up for analysis.
+#Change data types based on column
+factorvar <- c("q", "moniker") #these ought to be factors
+esmnull[factorvar] <- lapply(esmnull[factorvar], as.factor)
+numericvar <- c("qblock", "timepoint", "testingday", "time") #these ought to be numeric
+esmnull[numericvar] <- lapply(esmnull[numericvar], as.numeric)
+#recheck final mode and class to confirm changes set
+sapply(esmnull, mode)
+sapply(esmnull, class)
+
+### Subset data relevant to Emotion analysis aims
+emoterm <- c("Enthusiastic", "Happy_e", "Pleased", "Relaxed", "Nervous", "Sad", "Angry", "Irritated", "Stressed", "EmotionChronometry")
+emoonlynull <- subset(esmnull, subset = q %in% emoterm) #shorten emotion data
+emoonlynull$ans <- as.numeric(emoonlynull$ans) #change ans to data type per subset
+sapply(emoonlynull, class) #created a subset of data of all emotion terms
+    
+### Subset data relevant to Mind Wandering analysis aims
+mwterm <- c("MWoccur", "MWvalence", "MWsubject", "MWtemporal", "MWimmers", "MWcontrol", "MWspecif")
+mwonlynull <- subset(esmnull, subset = q %in% mwterm)
+mwonlynull$ans <- as.numeric(mwonlynull$ans) #created a subset of data with all mind-wandering
+
+### The following removes the existence of NA rows for faulty missing data  - that is, the mind wandering follow-up questions are not displayed if occurence was no (coded as 0) - so the following NA values are not true missing data, simply uncollected.
+mwonlynull <- mwonlynull %>%
+    group_by(moniker,time) %>%
+    filter(row_number() <= min(which(is.na(ans) == TRUE & lag(ans) == 0))-1) #Find the first row with "0,na" pattern in each group, filter out rows after it by going to the minimum row "0,na" that meets this condition and backtracking one more so only the first row (MWoccur =0) stays
+  #may display error but all is fine - double checked with mathematical truth of observations removed versus present.
+class(mwonlynull) # has multiple classes, which will cause issues in merging via rbind
+mwonlynull <- as.data.frame(mwonlynull) #corrected to now only read in as data.frame
+class(mwonlynull) #recheck, confirmed correct!
+
+### Subset data for block 1 (all timepoints on same testing scale (time 1 to 5))
+block1onlynull <- rbind(mwonlynull, emoonlynull) #use rbind, not merge, because all variables are the exact same, so binds vertically.
+class(block1onlynull)
+
+### Subset data for block 2 (Mood analysis) (all timepoints on same testing scale (time 6))
+allblock2 <- c("2")
+block2onlynull <- subset(esmnull, subset = qblock %in% allblock2)
+block2onlynull$ans <- as.numeric(block2onlynull$ans) #created a subset for data of all mood terms
+class(block2onlynull)
+```
+#      (3) Confirm Data Integrity
+  Before beginning to analyze data, I really want to make sure this huge set of hundreds of thousands observations isn't missing anything unexpectedly, whether that be from a glitch, naming issue, or download error. It's a lot of rows so here I code to check a single random participant to confirm scripting works, then adjust code to work to check the entire sample.
+```{r confirm overall data}
+### Confirm the dataset is appropriate and has read in the right number of expected observations (variables) per person per time.
+  checkP <- c("17") #First look at a single random participant to confirm responses look okay and no duplicates.
+  checkP1 <- subset(esmnull, subset = moniker %in% checkP) #shorten emotion data to this participant
+  # Check to see thenumber of observations (rows, aka variables) a single participant may have per timepoint (to confirm data matches expectations)
+  vischeck <- ddply(checkP1, .(time), summarize, num.complete = length(time))
+  vischeck
+  # We can plot this for the participant as well, to instead see visually that the pattern is correct across time.
+  ggplot(vischeck, aes(x=time, y=num.complete)) + 
+    geom_bar(stat="identity") +
+    scale_x_continuous(breaks=c(1.1:14.6), labels=c(1.1:14.6),limits=c(0,15)) +
+    scale_y_continuous(limits=c(0,50)) + theme_classic() + ggtitle("Single random participant data check")
+
+# We want to scale to all participants, so let's check all now.
+checkall <- esmnull
+#create a sheet with participant_time to assess counts across all 100+ participants
+    checkall$ptime <- paste(checkall$moniker,checkall$time, sep = "_") # blend participant and time to create a unique ID for every observation/person/time combination
+vischeckall <- ddply(checkall, .(ptime), summarize, num.complete = length(ptime)) #here we can see specific number per person per time, if we need to assess when something was specifically missing.
+#let's summarize even more, this will capture total observations per timepoint, which we can divide by number of participants.
+vischeckall2 <- ddply(checkall, .(time), summarize, num.complete = length(time))
+
+### Visually confirm the pattern of total completion matches appropriately - if anything is wonky, we can see here which timepoint may have less than expected data and then move forward to finding which participant that belongs to.
+  ggplot(vischeckall2, aes(x=time, y=num.complete)) + 
+    geom_bar(stat="identity") +
+    scale_x_continuous(breaks=c(1.1:14.6), labels=c(1.1:14.6),limits=c(0,15)) +
+    scale_y_continuous(limits=c(0,5000)) + theme_classic() + ggtitle("All participants cumulative data check")
+#all is perfect! This means all data is here, and we are ready to move forward to further refining the data formats.
+```
+#      (4) Troubleshooting Example
+  In a past version of the data, observation counts were not correct. This shows an example of troubleshooting until I am able to discover where things were missing, and reran the above data integrity confirmation until all was correct.
+```{r troubleshooting observation counts}
+### OldVersion "checkall" has 204,376 observations
+# 1,876 observations per participant. N=109. 1,876*109 = 204,484
+109*1876 #number of participants (109) * number of observations (1876)
+# We should have 204,484. If OldVersion has 204,376 
+204484-204376 #there are 108 missing observations
+#there are 18 variables per block 1 timepoint
+ 108/18 #Thus, 6 block1 timepoints be missing somewhere...check it out.
+missingtp <- checkall[,c(1, 5:8)] #shorten data to relevant columns
+missingtp <- unique(missingtp) # shorten down to focus on finding out which participants are missing timepoints.
+
+vistp <- ddply(missingtp, .(time), summarize, num.complete = length(time)) #visualize which timepoints have an imbalanced number complete to locate with timepoints are missing.
+#missing one 5.3, one 5.4, two 6.3, and two 6.4. found the 6 missing timepoints!!
+findmissing <- checkall[(checkall$time=="6.4"),] #check here per ID
+findmissing <- findmissing[,c(1, 7)]
+findmissing <- unique(findmissing)
+findmissing$moniker <- as.numeric(findmissing$moniker) # make sure moniker is numeric rather than a factor for sorting ease here.
+    sorted_moniker <- paste(sort(as.integer(levels(findmissing$moniker)))) #order by ascending value.
+
+# With this, we see that missing timepoints discovered to belong to...
+#ID=15 missing 6.3, 6.4
+#ID=16 missing 6.3, 6.4
+#ID=17 missing 5.3, 5.4
+
+###   
+# SOLVED! This is an error in how data was read in, and may have been a server issue. Correct the .txt file if needed for null rows to accurately reflect full missingness.
+```
+#      (5) Wide Versions of Data and Missingness
+* I want to create a wide format version using 'tidyr' in addition to the original long version for my 2 data blocks in order to assess missingness through 'mice' and also plot easily where applicable. The long data version is still useful for other analyses and plots later on.
+```{r missingness}
+### Read in the data and convert to wide format for certain analyses and visualizations
+#BLOCK 1
+widerblock1 <- rbind(mwonlynull, emoonlynull)
+c <- c("moniker", "q", "ans", "time")
+widerblock1 <- widerblock1[c]
+block1onlynullWIDE <- spread(widerblock1, q, ans)
+
+#BLOCK 2
+widerblock2 <- block2onlynull
+c <- c("moniker", "q", "ans", "time")
+widerblock2 <- widerblock2[c]
+block2onlynullWIDE <- spread(widerblock2, q, ans)
+
+### Assessing missingness
+  #block1
+  miss1 <- block1onlynullWIDE
+        #supershort for GIMME
+        gimmemissvar <- c("moniker", "time", "Happy_e", "Pleased", "Enthusiastic", "Relaxed", "Angry", "Irritated", "Stressed", "Sad", "Nervous", "MWoccur", "EmotionChronometry")
+        gimmemiss <- miss1[gimmemissvar]
+      #method 1: VIM
+      aggr(miss1, cex.axis = .5) #one way to visualize missingness with "VIM"
+      matrixplot(miss1) #a matrix plot for missingness
+      matrixplot(miss1, sortby = c("MWoccur"), cex.axis = .7) #sorting by the original branching MW question where the 'false' missing values may appear, confirming that most missing data is related to branching logic for those questions.
+      #method 2: mice
+      md.pattern(gimmemiss, plot = FALSE, rotate.names = TRUE) #check what proportion is missing
+      pMiss <- function(x){sum(is.na(x))/length(x)*100} #calculate to view percent of missingness per variable
+      apply(miss1,2,pMiss) #roughly 10% missing across non-MW variables, great!
+  
+  #block2
+  miss2 <- block2onlynullWIDE
+  aggr(miss2, cex.axis = .5)
+  md.pattern(miss2, plot = FALSE, rotate.names = TRUE)
+  apply(miss2,2,pMiss) #roughly 11% missing across variables, great! SleepTime and WakeTime are missing for almost all participants (90%) due to a collection issue and won't be able to be used in analysis.
+
+### Check for missingess patterns across the diagnostic groups - load these groups in now.
+groupcomplete <- read.csv(file = "~/ownCloud/PhD/Projects/Data/ESM/ESM group percent complete.csv", sep=',', na.strings=c(""), header = T, stringsAsFactors = FALSE, colClasses = "character")
+sapply(groupcomplete, class) #change the variables to the correct class
+groupcomplete$ID_ESM <- as.numeric(groupcomplete$ID_ESM)
+groupcomplete <- groupcomplete %>%
+  dplyr::rename(moniker = ID_ESM) #rename the "ID_ESM" to "moniker" so we can blend this with our dataset for group status.
+groupcomplete$Percent.Complete <- as.numeric(groupcomplete$Percent.Complete)
+groupcomplete$Group <- as.factor(groupcomplete$Group)
+levels(groupcomplete$Group) #check levels
+levels(groupcomplete$Group) <- c("Bipolar", "Healthy", "Depressed", "Remitted") #rename levels for Group as I prefer to plot, based on their order from above
+groupcomplete$Group <- factor(groupcomplete$Group, levels = c("Depressed", "Remitted", "Bipolar", "Healthy")) #reorder levels as I prefer for plotting
+
+groupcomplete %>% # Gather summary statistics of the percent complete across participants
+group_by(Group) %>%
+  summarise(
+    mean = mean(Percent.Complete, na.rm = TRUE),
+    sd = sd(Percent.Complete, na.rm = TRUE)
+  )
+
+### Visualizing missingness by groups
+# Boxplot by group
+ggboxplot(groupcomplete, x = "Group", y = "Percent.Complete", 
+          fill = "Group",
+          ylab = "Percent.Complete", xlab = "Clinical Group") + ggtitle("Missingess spread by group")
+# Create new column for limits on missingness
+groupcomplete$Colour=""
+# Set new column values to graphing specific colors per general range I have selected
+groupcomplete$Colour[groupcomplete$Percent.Complete>=.5]="5"
+groupcomplete$Colour[groupcomplete$Percent.Complete>=.6]="6"
+groupcomplete$Colour[groupcomplete$Percent.Complete>=.7]="7"
+groupcomplete$Colour[groupcomplete$Percent.Complete>=.8]="8"
+groupcomplete$Colour[groupcomplete$Percent.Complete>=.9]="9"
+# Histogram
+ggplot(groupcomplete, aes(x=Percent.Complete, color = Colour, fill = Colour)) + geom_histogram() + theme_classic() + theme(legend.position = "none") + ggtitle("Percent complete of total sample histogram") #shows data is skewed, so does not meet assumption needed for ANOVA. Use Kruskal-Wallis test instead.
+  kruskal.test(Percent.Complete ~ Group, data = groupcomplete) #Compute Kruskal-Wallis rank sum test
+# Scatterplot
+ggplot(groupcomplete, aes(x=moniker, y=Percent.Complete, colour = factor(Colour), shape = Colour)) + 
+geom_point(aes(size=1)) + theme_classic() +
+  ylim(0.5,1) + theme(legend.position = "none") + ggtitle("Percent complete of total sample scatterplot")
+
+### Briefly check missingness of Mood info from Block 2, as the original exclusions based on "number complete" may possibly meet inclusion critera if related to completion rate for this separate timescale.
+check <- aggregate(Anxious ~ moniker, data=block2onlynullWIDE, function(x) {sum(is.na(x))}, na.action = NULL) #use an exemplar mood
+table(check$Anxious) #the number of individuals missing data to review.
+#participant 36 missing 8 (will still keep since only excluding those missing 60%+ here) - all is good to continue!
+```
+#      (6) Analysis and creating Publication-Ready Plots
+  To show a simple analysis with the cleaned up data, these plots show local polynomial regression curves (with standard error) reflecting intraday emotion time-changes by diagnostic groups. This is to get a look at the overall data, and then move on to calculating an analysis on the instability of emotion in these participants.
+```{r general emotion trends by groups}
+### Rename our wide dataset for block1 to keep data clean depending on usage, such as here for plotting specifically.
+averageemos <- block1onlynullWIDE
+        short <- c("moniker", "time", "Angry", "Enthusiastic", "Happy_e", "Irritated", "Nervous", "Pleased", "Relaxed", "Sad", "Stressed", "EmotionChronometry")
+                averageemos <- averageemos[short]
+#average emotion as a predictor in all models for average positive and negative emotion, using column numbers for speed.
+averageemos$PositiveEmotion <- rowMeans(averageemos[,c(4,5,6,7)])
+averageemos$NegativeEmotion <- rowMeans(averageemos[,c(3,6,7,10,11)])
+averageemos <- averageemos[,c(1,2,13,14)] #shortening to vars for plotting only
+
+# Add in clinical group
+averageemos2 <- merge(groupcomplete, averageemos, by = "moniker", all.y=TRUE)
+levels(averageemos2$Group) #confirm how group has been read in
+
+# Plot trends of positive and negative emotion time courses of emotion with group trends distinguished from one another.
+hqimage <- ggplot(na.omit(averageemos2), aes(x = time, y = PositiveEmotion, colour=Group, fill=Group, linetype=Group)) +
+      geom_smooth(method="loess", se = TRUE) +
+      theme_classic() + scale_color_manual(values=wes_palette("Darjeeling1", n=4, type="continuous")) + scale_fill_manual(values=wes_palette("Darjeeling1", n=4, type="continuous")) +
+      labs(title="Positive emotion across time") 
+hqimage
+  image=hqimage #save the plot in a variable image to be able to export to svg
+#ggsave(file="PosEmocurvesDiag.svg", plot=hqimage, path = "~/ownCloud/PhD/Projects/LocationSaved") #saving!
+    
+hqimage2 <- ggplot(na.omit(averageemos2), aes(x = time, y = NegativeEmotion, shape=Group, colour=Group, fill=Group, linetype=Group)) +
+      geom_smooth(method="loess", se = TRUE) +
+      theme_classic() + scale_color_manual(values=wes_palette("Darjeeling1", n=4, type="continuous")) + scale_fill_manual(values=wes_palette("Darjeeling1", n=4, type="continuous")) +
+      labs(title="Negative emotion across time") 
+hqimage2
+    image=hqimage2
+#ggsave(file="NegEmocurvesDiag.svg", plot=hqimage2, path = "~/ownCloud/PhD/Projects/LocationSaved")
+```
+  Now I'll analyze how participants are experiencing instability of their emotions across time. That is, the average change in intensity between two successive timepoints for positive and negative affect. We calculate this as the mean of all squared differences between two successive intensity ratings of an affect state, square rooted to generate MSSD of affect.
+```{r emotional instability by groups, warning=FALSE}
+#STEP 1: get average positive rating for each timepoint and get average negative rating for each timepoint and format data correctly.
+  InstabilityEmoData <- averageemos2
+  #positive and negative affect
+  posvar <- c("moniker", "time", "Group", "PositiveEmotion")
+  negvar <- c("moniker", "time", "Group", "NegativeEmotion")
+  
+  #create two subsets for positive and negative emotions separately
+  InstabilityEmoDataPos <- InstabilityEmoData[posvar]
+  InstabilityEmoDataNeg <- InstabilityEmoData[negvar] 
+
+  #order participants by ID and timepoint
+  InstabilityEmoDataPos <- InstabilityEmoDataPos %>% arrange(moniker, time)
+  row.names(InstabilityEmoDataPos) <- NULL #to numerically reorder the row numbers for next steps
+  InstabilityEmoDataNeg <- InstabilityEmoDataNeg %>% arrange(moniker, time)
+  row.names(InstabilityEmoDataNeg) <- NULL
+
+  #loop through each participant ID and number all timepoints 1 to 70 (not dayN.1-dayN.5 repeated across 14 days)
+  InstabilityEmoDataPos$seqTime <- rep(c(1:70), 109)
+  InstabilityEmoDataNeg$seqTime <- rep(c(1:70), 109)
+  
+  shortpos <- c("moniker", "Group", "seqTime", "PositiveEmotion")
+  shortneg <- c("moniker", "Group", "seqTime", "NegativeEmotion")
+  
+  InstabilityEmoDataPos <- InstabilityEmoDataPos[shortpos]
+  InstabilityEmoDataNeg <- InstabilityEmoDataNeg[shortneg]
+
+  InstabilityEmoDataPos$PositiveEmotion[is.nan(InstabilityEmoDataPos$PositiveEmotion)] <- NA #confirm NAs reading in correctly
+  InstabilityEmoDataNeg$NegativeEmotion[is.nan(InstabilityEmoDataNeg$NegativeEmotion)] <- NA
+  
+#STEP 2: calculate MSSD in emotions by sequential time
+  #set frame as a data table
+  InstabilityEmoDataPos$moniker <- as.factor(InstabilityEmoDataPos$moniker)
+  InstabilityEmoDataNeg$moniker <- as.factor(InstabilityEmoDataNeg$moniker)
+  setDT(InstabilityEmoDataPos)
+  InstabilityEmoDataPos[ , Diff := PositiveEmotion - shift(PositiveEmotion), by = moniker] #we don't want to calculate the sequential difference between one participant's first timepoint and the previous participant's last timepoint, so this confirms that calculation is by moniker only.
+  setDT(InstabilityEmoDataNeg)
+  InstabilityEmoDataNeg[ , Diff := NegativeEmotion - shift(NegativeEmotion), by = moniker]
+  
+  #squared differences
+  InstabilityEmoDataPos$sqDiff <- (InstabilityEmoDataPos$Diff)^2
+  InstabilityEmoDataNeg$sqDiff <- (InstabilityEmoDataNeg$Diff)^2
+  InstabilityEmoDataPos <- na.omit(InstabilityEmoDataPos) #remove NAs
+  InstabilityEmoDataNeg <- na.omit(InstabilityEmoDataNeg)
+  
+  #average squared differences per participant
+  InstabilityEmoDataPosMean <- aggregate(InstabilityEmoDataPos[, 6], list(InstabilityEmoDataPos$moniker), mean)
+  InstabilityEmoDataNegMean <- aggregate(InstabilityEmoDataNeg[, 6], list(InstabilityEmoDataNeg$moniker), mean)
+
+  InstabilityEmoDataPosMean$PositiveEmotionMSSD <- sqrt(InstabilityEmoDataPosMean$sqDiff) #square rooted
+  InstabilityEmoDataNegMean$NegativeEmotionMSSD <- sqrt(InstabilityEmoDataNegMean$sqDiff)
+#MSSD values per emotion created
+
+#STEP 3: Cleaning the final calculated datasets
+  #renaming, merging, and readding groups
+  InstabilityEmoDataPosMean <- dplyr::rename(InstabilityEmoDataPosMean, moniker = Group.1) 
+  InstabilityEmoDataNegMean <- dplyr::rename(InstabilityEmoDataNegMean, moniker = Group.1)
+  #merge positive and negative MSSD
+  InstabilityEmoDataPosNegMean <- merge(InstabilityEmoDataPosMean, InstabilityEmoDataNegMean, by="moniker")
+  mssd <- c("moniker", "PositiveEmotionMSSD", "NegativeEmotionMSSD")
+  InstabilityEmoDataPosNegMean <- InstabilityEmoDataPosNegMean[mssd]
+  Group <- unique(averageemos2[,c(1, 3)]) #add back in Group
+  InstabilityEmoDataPosNegMean <- merge(InstabilityEmoDataPosNegMean, Group, by="moniker")
+  
+  meltInstability <- melt(InstabilityEmoDataPosNegMean, id=c("moniker","Group")) #melt and reshape the final data for easy plotting.
+  meltInstability <- dplyr::rename(meltInstability, AffectDynamic = variable) #rename variable or else pvalue computation through ggpubr gets glitchy
+
+stat.testIns <- meltInstability %>% #calculate a corrected pairwise comparison of our groups on instability dnyamic measures
+  group_by(AffectDynamic) %>%
+  wilcox_test(value ~ Group) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance()
+stat.testIns
+stat.testIns <- stat.testIns %>% add_xy_position(x = "Group")
+  
+  ggplot(na.omit(meltInstability), aes(x=Group, y=value)) + geom_boxplot(aes(fill=Group)) + facet_wrap( ~AffectDynamic, scales="free") + 
+  ggtitle("Emotional Instability in Clinical Groups") + theme_classic() +
+  stat_pvalue_manual(stat.testIns, bracket.shorten = .1, hide.ns = TRUE) + theme(strip.text.x = element_text(size = 12), strip.text=element_text(vjust=1))
+```
